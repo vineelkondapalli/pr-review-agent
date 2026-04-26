@@ -1,0 +1,10 @@
+anthropic>=0.40.0
+langchain-anthropic>=0.3
+langgraph>=0.2
+qdrant-client>=1.9
+sentence-transformers>=3.0
+PyGithub>=2.3
+python-dotenv>=1.0
+mcp>=1.0
+pytest>=8.0
+tenacity>=8.0

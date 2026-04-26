@@ -463,13 +463,16 @@ def _cmd_collections(args: list[str], session: dict[str, Any]) -> None:
     active = session.get("active_collection")
     table = Table(title="Qdrant Collections", border_style=PURPLE, show_header=True)
     table.add_column("Collection", style=CYAN)
+    table.add_column("Use as", style="dim")
     table.add_column("Vectors", justify="right", style="white")
     table.add_column("Status", style="green")
 
     for col in cols:
         name = col["name"]
         marker = " ◀" if name == active else ""
-        table.add_row(name + marker, str(col["vectors_count"]), col["status"])
+        # Convert collection name back to owner/repo hint (first underscore → slash)
+        repo_hint = name.replace("_", "/", 1)
+        table.add_row(name + marker, repo_hint, str(col["vectors_count"]), col["status"])
 
     console.print(table)
 
@@ -608,6 +611,14 @@ def _cmd_use(args: list[str], session: dict[str, Any]) -> None:
         return
 
     repo = args[0]
+
+    if "/" not in repo:
+        console.print(
+            f"[yellow]⚠ Expected [bold]owner/repo[/bold] format (e.g. [bold]encode/httpx[/bold]), "
+            f"not a collection name.[/yellow]"
+        )
+        return
+
     collection = repo.replace("/", "_")
 
     from retrieval.vector_store import VectorStore

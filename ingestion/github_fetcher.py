@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from github import Github, RateLimitExceededException
+from github import Auth, Github, RateLimitExceededException
 from github.PullRequest import PullRequest
 from tenacity import (
     before_sleep_log,
@@ -108,7 +108,7 @@ class GitHubFetcher:
     """Pulls PR history from a GitHub repo with concurrent fetching and local JSON cache."""
 
     def __init__(self, token: str, repo_str: str, cache_dir: Optional[Path] = None) -> None:
-        self.gh = Github(token)
+        self.gh = Github(auth=Auth.Token(token))
         self.repo = self.gh.get_repo(repo_str)
         self.repo_str = repo_str
         slug = repo_str.replace("/", "_")

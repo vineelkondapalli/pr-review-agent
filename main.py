@@ -52,7 +52,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 def cmd_review(args: argparse.Namespace) -> None:
     import anthropic
-    from github import Github
+    from github import Auth, Github
     from ingestion.embedder import Embedder
     from retrieval.vector_store import VectorStore
     from retrieval.reranker import Reranker
@@ -65,7 +65,7 @@ def cmd_review(args: argparse.Namespace) -> None:
     collection = args.repo.replace("/", "_")
 
     print(f"Fetching PR #{args.pr} from {args.repo}...")
-    gh = Github(token)
+    gh = Github(auth=Auth.Token(token))
     repo = gh.get_repo(args.repo)
     pr = repo.get_pull(args.pr)
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import anthropic
 from dotenv import load_dotenv
-from github import Github
+from github import Auth, Github
 
 load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -124,7 +124,7 @@ class EvalRunner:
         critic = Critic(client)
 
         # Fetch holdout PRs via PyGithub for diff access
-        gh = Github(token)
+        gh = Github(auth=Auth.Token(token))
         gh_repo = gh.get_repo(self.repo_str)
 
         records: list[EvalRecord] = []

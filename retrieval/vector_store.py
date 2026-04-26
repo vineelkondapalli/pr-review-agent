@@ -78,16 +78,16 @@ class VectorStore:
     ) -> list[dict[str, Any]]:
         """Search the collection and return payloads with scores."""
         qdrant_filter = self._build_filter(filters) if filters else None
-        results = self.client.search(
+        results = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=qdrant_filter,
             limit=top_k,
             with_payload=True,
         )
         return [
             {**r.payload, "score": r.score}
-            for r in results
+            for r in results.points
         ]
 
     def _build_filter(self, filters: dict[str, Any]) -> models.Filter:

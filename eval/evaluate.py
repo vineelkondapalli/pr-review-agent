@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import anthropic
@@ -90,33 +91,30 @@ class EvalRunner:
         self.limit = limit
         self.collection = repo_str.replace("/", "_") + "_eval"
 
-    def run(self) -> list[EvalRecord]:
+    def run(self, progress_callback: Callable[[str, int, int], None] | None = None) -> list[EvalRecord]:
         token = os.environ["GITHUB_TOKEN"]
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-        print(f"Fetching up to {self.limit} PRs from {self.repo_str}...")
         fetcher = GitHubFetcher(token=token, repo_str=self.repo_str)
         all_prs = fetcher.fetch_prs(limit=self.limit)
 
         if len(all_prs) <= self.holdout:
-            print(f"Not enough PRs ({len(all_prs)}) for holdout of {self.holdout}")
-            sys.exit(1)
+            raise ValueError(f"Not enough PRs ({len(all_prs)}) for holdout of {self.holdout}")
 
         train_prs = all_prs[self.holdout:]
         holdout_prs = all_prs[:self.holdout]
-        print(f"Train: {len(train_prs)} PRs, Holdout: {len(holdout_prs)} PRs")
 
         # Ingest training PRs
         vs = VectorStore(collection_name=self.collection)
         embedder = Embedder()
         reranker = Reranker()
 
-        print("Ingesting training PRs...")
         all_chunks = []
         for pr in train_prs:
             all_chunks.extend(chunk_pr(pr, self.repo_str))
-        n = embedder.embed_chunks(all_chunks, vs)
-        print(f"Ingested {n} chunks")
+        embedder.embed_chunks(all_chunks, vs)
+        if progress_callback:
+            progress_callback("ingest", 1, 1)
 
         planner = Planner(client)
         executor = Executor(vs, embedder, reranker)
@@ -129,11 +127,7 @@ class EvalRunner:
 
         records: list[EvalRecord] = []
         train_pr_numbers = {pr.pr_number for pr in train_prs}
-
-        print(f"\nEvaluating {len(holdout_prs)} holdout PRs...\n")
-        header = f"{'PR#':>5}  {'Recall':>7}  {'Citation':>8}  {'Relevance':>9}"
-        print(header)
-        print("-" * len(header))
+        done = 0
 
         for pr_data in holdout_prs:
             try:
@@ -163,29 +157,20 @@ class EvalRunner:
                 else:
                     recall = 1.0  # no ground truth refs → vacuously perfect
 
-                # Citation accuracy
-                citation_ok = final.verified
-
-                # Relevance score
-                relevance = _judge_relevance(client, diff, final.cleaned_review)
-
                 record = EvalRecord(
                     pr_number=pr_data.pr_number,
                     retrieval_recall=recall,
-                    citation_accurate=citation_ok,
-                    relevance_score=relevance,
+                    citation_accurate=final.verified,
+                    relevance_score=_judge_relevance(client, diff, final.cleaned_review),
                 )
                 records.append(record)
-                print(f"{pr_data.pr_number:>5}  {recall:>7.2f}  {'✓' if citation_ok else '✗':>8}  {relevance:>9}")
 
             except Exception as exc:
                 logger.warning("PR #%d eval failed: %s", pr_data.pr_number, exc)
 
-        if records:
-            avg_recall = sum(r.retrieval_recall for r in records) / len(records)
-            pct_accurate = sum(1 for r in records if r.citation_accurate) / len(records) * 100
-            avg_relevance = sum(r.relevance_score for r in records) / len(records)
-            print(f"\n{'AVERAGES':>5}  {avg_recall:>7.2f}  {pct_accurate:>7.0f}%  {avg_relevance:>9.2f}")
+            done += 1
+            if progress_callback:
+                progress_callback("eval", done, len(holdout_prs))
 
         return records
 

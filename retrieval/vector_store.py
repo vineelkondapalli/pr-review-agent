@@ -111,8 +111,33 @@ class VectorStore:
                 )
             )
 
+        pr_number_lt = filters.get("pr_number_lt")
+        if pr_number_lt is not None:
+            must.append(
+                models.FieldCondition(
+                    key="pr_number",
+                    range=models.Range(lt=pr_number_lt),
+                )
+            )
+
         return models.Filter(must=must) if must else models.Filter()
 
     def delete_collection(self) -> None:
         self.client.delete_collection(self.collection_name)
         logger.info("Deleted Qdrant collection '%s'", self.collection_name)
+
+    @staticmethod
+    def list_collections() -> list[dict]:
+        """Return info for all collections in Qdrant."""
+        host = os.getenv("QDRANT_HOST", "localhost")
+        port = int(os.getenv("QDRANT_PORT", "6333"))
+        client = QdrantClient(host=host, port=port)
+        result = []
+        for c in client.get_collections().collections:
+            info = client.get_collection(c.name)
+            result.append({
+                "name": c.name,
+                "vectors_count": info.vectors_count or 0,
+                "status": str(info.status),
+            })
+        return result

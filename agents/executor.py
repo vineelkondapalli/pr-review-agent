@@ -28,7 +28,7 @@ class Executor:
         self.per_query_top_k = per_query_top_k
         self.final_top_k = final_top_k
 
-    def execute(self, plan: PlannerOutput) -> list[dict[str, Any]]:
+    def execute(self, plan: PlannerOutput, pr_number_lt: int | None = None) -> list[dict[str, Any]]:
         """Run all sub-queries, merge, deduplicate, rerank, and return top chunks."""
         all_chunks: list[dict[str, Any]] = []
 
@@ -37,6 +37,8 @@ class Executor:
             filters["chunk_types"] = plan.chunk_types
         if plan.file_filters:
             filters["file_filters"] = plan.file_filters
+        if pr_number_lt is not None:
+            filters["pr_number_lt"] = pr_number_lt
 
         for query in plan.queries:
             try:

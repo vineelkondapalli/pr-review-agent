@@ -1,6 +1,7 @@
 """Embeds PR chunks using sentence-transformers and upserts them into Qdrant."""
 
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sentence_transformers import SentenceTransformer
@@ -25,6 +26,7 @@ class Embedder:
         chunks: list[Chunk],
         vector_store: VectorStore,
         batch_size: int = 64,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> int:
         """Embed chunks in batches of `batch_size` and upsert batches to Qdrant in parallel."""
         if not chunks:
@@ -41,7 +43,7 @@ class Embedder:
         vectors = self.model.encode(
             texts,
             batch_size=batch_size,
-            show_progress_bar=len(new_chunks) > batch_size,
+            show_progress_bar=False,
             convert_to_numpy=True,
         )
 
@@ -62,6 +64,7 @@ class Embedder:
 
         # Parallelize upserts across batches
         errors = 0
+        done = 0
         with ThreadPoolExecutor(max_workers=_UPSERT_WORKERS) as pool:
             futures = {pool.submit(vector_store.upsert, batch): i for i, batch in enumerate(batches)}
             for future in as_completed(futures):
@@ -70,6 +73,9 @@ class Embedder:
                 except Exception as exc:
                     errors += 1
                     logger.error("Upsert batch %d failed: %s", futures[future], exc)
+                done += 1
+                if progress_callback is not None:
+                    progress_callback(done, len(batches))
 
         if errors:
             logger.warning("%d upsert batch(es) failed out of %d", errors, len(batches))

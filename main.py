@@ -179,7 +179,7 @@ def _citations_panel(chunks: list[dict[str, Any]]) -> None:
 
 def _cmd_ingest(args: list[str], session: dict[str, Any]) -> None:
     if not args:
-        console.print(f"[{PURPLE}]Usage:[/] ingest <owner/repo> [--limit N]")
+        console.print(f"[{PURPLE}]Usage:[/] ingest <owner/repo> [N | --limit N]")
         return
 
     repo = args[0]
@@ -188,6 +188,11 @@ def _cmd_ingest(args: list[str], session: dict[str, Any]) -> None:
         idx = args.index("--limit")
         if idx + 1 < len(args):
             limit = int(args[idx + 1])
+    elif len(args) >= 2:
+        try:
+            limit = int(args[1])
+        except ValueError:
+            pass
 
     from ingestion.github_fetcher import GitHubFetcher
     from ingestion.chunker import chunk_pr
@@ -698,7 +703,7 @@ def _cmd_help(args: list[str], session: dict[str, Any]) -> None:
     table.add_column("Description", style="white")
 
     rows = [
-        ("ingest", "<owner/repo> [--limit N]", "Ingest PR history (omit --limit for full repo)"),
+        ("ingest", "<owner/repo> [N | --limit N]", "Ingest PR history (omit limit for full repo)"),
         ("use", "<owner/repo>", "Set active repo (must already be ingested)"),
         ("review", "<pr_number>", "Review a PR (uses active repo)"),
         ("review", "<owner/repo> <pr_number>", "Review a PR in any repo"),

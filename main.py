@@ -601,6 +601,29 @@ def _cmd_eval(args: list[str], session: dict[str, Any]) -> None:
     console.print(table)
 
 
+def _cmd_use(args: list[str], session: dict[str, Any]) -> None:
+    if not args:
+        console.print(f"[{PURPLE}]Usage:[/] use <owner/repo>")
+        return
+
+    repo = args[0]
+    collection = repo.replace("/", "_")
+
+    from retrieval.vector_store import VectorStore
+
+    known = {c["name"] for c in VectorStore.list_collections()}
+    if collection not in known:
+        console.print(
+            f"[yellow]⚠ No ingested data for [bold]{repo}[/bold]. "
+            f"Run 'ingest {repo}' first.[/yellow]"
+        )
+        return
+
+    session["active_repo"] = repo
+    session["active_collection"] = collection
+    console.print(f"[green]✓ Active repo set to [bold]{repo}[/bold].[/green]")
+
+
 def _cmd_serve(args: list[str], session: dict[str, Any]) -> None:
     from mcp_server.server import run
     console.print("[dim]Starting MCP server on stdio (Ctrl+C to stop)...[/dim]")
@@ -615,6 +638,7 @@ def _cmd_help(args: list[str], session: dict[str, Any]) -> None:
 
     rows = [
         ("ingest", "<owner/repo> [--limit N]", "Ingest PR history into Qdrant"),
+        ("use", "<owner/repo>", "Set active repo (must already be ingested)"),
         ("review", "<pr_number>", "Review a PR (uses active repo)"),
         ("review", "<owner/repo> <pr_number>", "Review a PR in any repo"),
         ("chat", "[message]", "Chat about the repo's PR history (RAG-grounded)"),
@@ -641,6 +665,7 @@ def _cmd_exit(args: list[str], session: dict[str, Any]) -> str:
 
 COMMANDS: dict[str, Any] = {
     "ingest": _cmd_ingest,
+    "use": _cmd_use,
     "review": _cmd_review,
     "chat": _cmd_chat,
     "collections": _cmd_collections,

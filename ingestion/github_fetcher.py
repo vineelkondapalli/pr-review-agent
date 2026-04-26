@@ -114,12 +114,15 @@ class GitHubFetcher:
         slug = repo_str.replace("/", "_")
         self.cache_dir = (cache_dir or _CACHE_DIR) / slug
 
-    def fetch_prs(self, limit: int = 200) -> list[PRData]:
-        """Fetch up to `limit` closed PRs, using cache where available, concurrent otherwise."""
+    def fetch_prs(self, limit: int | None = None) -> list[PRData]:
+        """Fetch closed PRs, using cache where available, concurrent otherwise.
+
+        If limit is None, fetches the entire PR history.
+        """
         # Collect the lightweight PR stubs first (single paginated call)
         pr_stubs: list[PullRequest] = []
         for pr in self.repo.get_pulls(state="closed", sort="created", direction="desc"):
-            if len(pr_stubs) >= limit:
+            if limit is not None and len(pr_stubs) >= limit:
                 break
             pr_stubs.append(pr)
 

@@ -177,7 +177,7 @@ def _cmd_ingest(args: list[str], session: dict[str, Any]) -> None:
         return
 
     repo = args[0]
-    limit = 200
+    limit: int | None = None
     if "--limit" in args:
         idx = args.index("--limit")
         if idx + 1 < len(args):
@@ -200,7 +200,8 @@ def _cmd_ingest(args: list[str], session: dict[str, Any]) -> None:
         console=console,
     ) as progress:
         # Stage 1: Fetch
-        t_fetch = progress.add_task(f"[{CYAN}]Fetching PRs...[/]", total=None)
+        fetch_label = f"[{CYAN}]Fetching PRs (limit: {limit})...[/]" if limit else f"[{CYAN}]Fetching all PRs...[/]"
+        t_fetch = progress.add_task(fetch_label, total=None)
         fetcher = GitHubFetcher(token=token, repo_str=repo)
         prs = fetcher.fetch_prs(limit=limit)
         progress.update(t_fetch, description=f"[{CYAN}]Fetched {len(prs)} PRs[/]", total=1, completed=1)
@@ -637,7 +638,7 @@ def _cmd_help(args: list[str], session: dict[str, Any]) -> None:
     table.add_column("Description", style="white")
 
     rows = [
-        ("ingest", "<owner/repo> [--limit N]", "Ingest PR history into Qdrant"),
+        ("ingest", "<owner/repo> [--limit N]", "Ingest PR history (omit --limit for full repo)"),
         ("use", "<owner/repo>", "Set active repo (must already be ingested)"),
         ("review", "<pr_number>", "Review a PR (uses active repo)"),
         ("review", "<owner/repo> <pr_number>", "Review a PR in any repo"),

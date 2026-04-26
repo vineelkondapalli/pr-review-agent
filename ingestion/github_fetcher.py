@@ -1,34 +1,69 @@
-"""Fetches PR history from a GitHub repository using the PyGithub API.
+"""Fetches PR history from a GitHub repository.
 
-PRs are fetched concurrently (ThreadPoolExecutor, max 10 workers). Already-fetched
-PRs are cached as JSON under cache/<repo_owner>_<repo_name>/ so subsequent runs
-skip the network entirely for cached PRs.
+Uses the GitHub GraphQL API for PR metadata and comments (batched per page —
+one GraphQL call per 100 PRs), and the REST API only for per-PR file patches
+(one call per uncached PR).  This cuts total API calls ~3× versus the pure
+REST approach and keeps ingestion well inside GitHub's 5 000 req/hour limit.
 """
 
 import dataclasses
 import json
 import logging
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from github import Auth, Github, RateLimitExceededException
-from github.PullRequest import PullRequest
+import requests
 from tenacity import (
     before_sleep_log,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
 
 logger = logging.getLogger(__name__)
 
-_MAX_WORKERS = 10
+_MAX_WORKERS = 5
 _CACHE_DIR = Path("cache")
+_GRAPHQL_URL = "https://api.github.com/graphql"
 
+# PR authors matching these patterns are skipped before any REST calls are made.
+_BOT_SUFFIXES = ("[bot]",)
+_BOT_NAMES = frozenset({"github-actions", "dependabot", "renovate", "snyk-bot"})
+
+_GRAPHQL_QUERY = """
+query($owner: String!, $name: String!, $after: String, $first: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(
+      states: [CLOSED, MERGED]
+      first: $first
+      after: $after
+      orderBy: {field: CREATED_AT, direction: DESC}
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title body state merged
+        author { login }
+        createdAt mergedAt
+        labels(first: 20) { nodes { name } }
+        reviewThreads(first: 50) {
+          nodes {
+            comments(first: 10) {
+              nodes { body path originalLine author { login } }
+            }
+          }
+        }
+        comments(first: 50) { nodes { body } }
+      }
+    }
+  }
+}
+"""
+
+
+# ── Data classes ───────────────────────────────────────────────────────────────
 
 @dataclass
 class FileData:
@@ -60,7 +95,12 @@ class PRData:
     general_comments: list[str]
 
 
-# ── Cache helpers ──────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _is_bot_author(author: str) -> bool:
+    lower = (author or "").lower()
+    return any(lower.endswith(s) for s in _BOT_SUFFIXES) or lower in _BOT_NAMES
+
 
 def _cache_path(cache_dir: Path, pr_number: int) -> Path:
     return cache_dir / f"{pr_number}.json"
@@ -102,105 +142,199 @@ def _load_cache(path: Path) -> Optional[PRData]:
         return None
 
 
-# ── Fetcher ───────────────────────────────────────────────────────────────────
+def _is_rate_limited(exc: BaseException) -> bool:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return exc.response.status_code in (403, 429)
+    return False
+
+
+# ── Fetcher ────────────────────────────────────────────────────────────────────
 
 class GitHubFetcher:
-    """Pulls PR history from a GitHub repo with concurrent fetching and local JSON cache."""
+    """Fetches PR history using GraphQL (metadata + comments) + REST (file patches)."""
 
     def __init__(self, token: str, repo_str: str, cache_dir: Optional[Path] = None) -> None:
-        self.gh = Github(auth=Auth.Token(token))
-        self.repo = self.gh.get_repo(repo_str)
+        self.token = token
         self.repo_str = repo_str
+        self.owner, self.repo_name = repo_str.split("/", 1)
         slug = repo_str.replace("/", "_")
         self.cache_dir = (cache_dir or _CACHE_DIR) / slug
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Authorization": f"bearer {token}",
+            "Accept": "application/vnd.github.v3+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        })
 
     def fetch_prs(self, limit: int | None = None) -> list[PRData]:
-        """Fetch closed PRs, using cache where available, concurrent otherwise.
+        """Fetch all PRs as a list (streams internally). Use stream_prs for large repos."""
+        return [pr for batch in self.stream_prs(limit=limit) for pr in batch]
 
-        If limit is None, fetches the entire PR history.
+    def stream_prs(self, limit: int | None = None, batch_size: int = 100):
+        """Yield batches of PRData.
+
+        Each iteration makes 1 GraphQL call (metadata + comments for up to 100 PRs)
+        then 1 REST call per uncached PR for file patches.
+        Bots are filtered before any REST calls are made.
         """
-        # Collect the lightweight PR stubs first (single paginated call)
-        pr_stubs: list[PullRequest] = []
-        for pr in self.repo.get_pulls(state="closed", sort="created", direction="desc"):
-            if limit is not None and len(pr_stubs) >= limit:
+        count = 0
+        cursor: Optional[str] = None
+
+        while True:
+            page, has_next, cursor = self._graphql_page(cursor, min(batch_size, 100))
+
+            if not page:
                 break
-            pr_stubs.append(pr)
 
-        cache_hits = 0
-        results: dict[int, PRData] = {}
+            # Apply hard limit before bot filter so limit semantics are consistent
+            if limit is not None:
+                page = page[: max(0, limit - count)]
+            count += len(page)
 
-        # Split into cached vs needs-fetch
-        to_fetch: list[PullRequest] = []
-        for pr in pr_stubs:
-            cached = _load_cache(_cache_path(self.cache_dir, pr.number))
-            if cached is not None:
-                results[pr.number] = cached
-                cache_hits += 1
-            else:
-                to_fetch.append(pr)
+            # Skip bots — no REST call wasted on them
+            to_resolve = [p for p in page if not _is_bot_author(p["author"])]
 
-        logger.info(
-            "%d PRs from cache, %d to fetch from GitHub", cache_hits, len(to_fetch)
-        )
+            if to_resolve:
+                batch = self._resolve_files(to_resolve)
+                if batch:
+                    yield batch
 
-        # Fetch the rest concurrently
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            future_to_pr = {pool.submit(self._extract_pr, pr): pr for pr in to_fetch}
-            for future in as_completed(future_to_pr):
-                pr = future_to_pr[future]
-                try:
-                    pr_data = future.result()
-                    results[pr.number] = pr_data
-                    _save_cache(_cache_path(self.cache_dir, pr.number), pr_data)
-                    logger.debug("Fetched PR #%d: %s", pr.number, pr.title)
-                except Exception as exc:
-                    logger.warning("Skipping PR #%d: %s", pr.number, exc)
-
-        # Return in original order (most-recent first)
-        ordered = [results[pr.number] for pr in pr_stubs if pr.number in results]
-        logger.info("Returning %d PRs from %s", len(ordered), self.repo_str)
-        return ordered
+            if not has_next or (limit is not None and count >= limit):
+                break
 
     @retry(
-        wait=wait_exponential(multiplier=1, min=1, max=60),
+        wait=wait_exponential(multiplier=2, min=5, max=120),
         stop=stop_after_attempt(5),
-        retry=retry_if_exception_type(RateLimitExceededException),
+        retry=retry_if_exception(_is_rate_limited),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
-    def _extract_pr(self, pr: PullRequest) -> PRData:
-        """Fetch all detail for one PR; the three sub-calls run concurrently."""
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            f_files = pool.submit(lambda: list(pr.get_files()))
-            f_review = pool.submit(lambda: list(pr.get_review_comments()))
-            f_comments = pool.submit(lambda: list(pr.get_issue_comments()))
-            raw_files = f_files.result()
-            raw_review = f_review.result()
-            raw_comments = f_comments.result()
+    def _graphql_page(self, cursor: Optional[str], page_size: int):
+        """Fetch one page of PRs (metadata + comments) via GraphQL.
 
-        files = [FileData(filename=f.filename, patch=f.patch) for f in raw_files]
-        review_comments = [
-            ReviewComment(
-                body=rc.body,
-                path=rc.path,
-                line=rc.line,
-                author=rc.user.login if rc.user else "unknown",
-            )
-            for rc in raw_review
-        ]
-        general_comments = [c.body for c in raw_comments if c.body]
-
-        return PRData(
-            pr_number=pr.number,
-            title=pr.title or "",
-            description=pr.body or "",
-            labels=[label.name for label in pr.labels],
-            state=pr.state,
-            merged=pr.merged,
-            author=pr.user.login if pr.user else "unknown",
-            created_at=pr.created_at.isoformat() if pr.created_at else "",
-            merged_at=pr.merged_at.isoformat() if pr.merged_at else None,
-            files=files,
-            review_comments=review_comments,
-            general_comments=general_comments,
+        Returns (partial_prs, has_next, end_cursor).
+        """
+        resp = self._session.post(
+            _GRAPHQL_URL,
+            json={
+                "query": _GRAPHQL_QUERY,
+                "variables": {
+                    "owner": self.owner,
+                    "name": self.repo_name,
+                    "after": cursor,
+                    "first": page_size,
+                },
+            },
+            timeout=30,
         )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("data") is None:
+            raise ValueError(f"GraphQL null data: {data.get('errors')}")
+        if "errors" in data:
+            raise ValueError(f"GraphQL errors: {data['errors']}")
+
+        conn = data["data"]["repository"]["pullRequests"]
+        page_info = conn["pageInfo"]
+
+        partial_prs = []
+        for node in conn["nodes"]:
+            author = (node.get("author") or {}).get("login", "unknown")
+
+            review_comments = []
+            for thread in (node.get("reviewThreads") or {}).get("nodes", []):
+                for comment in (thread.get("comments") or {}).get("nodes", []):
+                    review_comments.append(ReviewComment(
+                        body=comment.get("body", ""),
+                        path=comment.get("path", ""),
+                        line=comment.get("originalLine"),
+                        author=(comment.get("author") or {}).get("login", "unknown"),
+                    ))
+
+            general_comments = [
+                c["body"]
+                for c in (node.get("comments") or {}).get("nodes", [])
+                if c.get("body")
+            ]
+
+            partial_prs.append({
+                "pr_number": node["number"],
+                "title": node.get("title") or "",
+                "description": node.get("body") or "",
+                "labels": [lb["name"] for lb in (node.get("labels") or {}).get("nodes", [])],
+                "state": (node.get("state") or "").lower(),
+                "merged": node.get("merged", False),
+                "author": author,
+                "created_at": node.get("createdAt") or "",
+                "merged_at": node.get("mergedAt"),
+                "review_comments": review_comments,
+                "general_comments": general_comments,
+            })
+
+        return partial_prs, page_info["hasNextPage"], page_info["endCursor"]
+
+    def _resolve_files(self, partial_prs: list[dict]) -> list[PRData]:
+        """Check cache, fetch file patches via REST for uncached PRs, assemble PRData."""
+        results: dict[int, PRData] = {}
+        to_fetch: list[dict] = []
+
+        for partial in partial_prs:
+            cached = _load_cache(_cache_path(self.cache_dir, partial["pr_number"]))
+            if cached is not None:
+                results[partial["pr_number"]] = cached
+            else:
+                to_fetch.append(partial)
+
+        if to_fetch:
+            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+                futures = {pool.submit(self._fetch_files_rest, p): p for p in to_fetch}
+                try:
+                    for future in as_completed(futures, timeout=300):
+                        partial = futures[future]
+                        try:
+                            files = future.result()
+                            pr_data = PRData(
+                                pr_number=partial["pr_number"],
+                                title=partial["title"],
+                                description=partial["description"],
+                                labels=partial["labels"],
+                                state=partial["state"],
+                                merged=partial["merged"],
+                                author=partial["author"],
+                                created_at=partial["created_at"],
+                                merged_at=partial["merged_at"],
+                                files=files,
+                                review_comments=partial["review_comments"],
+                                general_comments=partial["general_comments"],
+                            )
+                            results[pr_data.pr_number] = pr_data
+                            _save_cache(_cache_path(self.cache_dir, pr_data.pr_number), pr_data)
+                            logger.debug("Fetched PR #%d", pr_data.pr_number)
+                        except Exception as exc:
+                            logger.warning("Skipping PR #%d: %s", partial["pr_number"], exc)
+                except TimeoutError:
+                    logger.warning("Batch timed out after 300 s; proceeding with partial results")
+
+        return [results[p["pr_number"]] for p in partial_prs if p["pr_number"] in results]
+
+    @retry(
+        wait=wait_exponential(multiplier=2, min=5, max=120),
+        stop=stop_after_attempt(5),
+        retry=retry_if_exception(_is_rate_limited),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _fetch_files_rest(self, partial_pr: dict) -> list[FileData]:
+        """Fetch file patches for one PR via REST (the only per-PR REST call)."""
+        files: list[FileData] = []
+        url = f"https://api.github.com/repos/{self.repo_str}/pulls/{partial_pr['pr_number']}/files"
+        while url:
+            resp = self._session.get(url, params={"per_page": 100}, timeout=30)
+            resp.raise_for_status()
+            files.extend(
+                FileData(filename=f["filename"], patch=f.get("patch"))
+                for f in resp.json()
+            )
+            url = resp.links.get("next", {}).get("url")
+        return files

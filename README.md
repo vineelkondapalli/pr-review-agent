@@ -52,7 +52,7 @@ GitHub Repo
 |-----------------|----------------------------------------------|
 | Language        | Python 3.11+                                 |
 | GitHub API      | PyGithub                                     |
-| Embeddings      | sentence-transformers `all-MiniLM-L6-v2`     |
+| Embeddings      | sentence-transformers `BAAI/bge-base-en-v1.5` |
 | Vector DB       | Qdrant (local via Docker)                    |
 | Reranking       | `cross-encoder/ms-marco-MiniLM-L-6-v2`       |
 | Agent LLM       | Claude `claude-haiku-4-5-20251001`           |
@@ -85,6 +85,10 @@ docker compose up -d
 ```
 
 Qdrant dashboard: http://localhost:6333/dashboard
+
+> **Note:** If you change the embedding model in `models.py`, you must delete and re-ingest
+> all existing Qdrant collections — the stored vector dimensions will no longer match.
+> Run `clear <owner/repo>` from the Revue REPL, then `ingest` again.
 
 ### 3. Configure environment
 

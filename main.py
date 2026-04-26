@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+import queue
 import sys
+import threading
 from typing import Any
 
 # Ensure the project root is importable when running as an installed entry point.
@@ -194,6 +196,28 @@ def _cmd_ingest(args: list[str], session: dict[str, Any]) -> None:
 
     token = os.environ["GITHUB_TOKEN"]
     collection = repo.replace("/", "_")
+    vs = VectorStore(collection_name=collection)
+    embedder = Embedder()
+    fetcher = GitHubFetcher(token=token, repo_str=repo)
+
+    # Producer fills a bounded queue; consumer (main thread) embeds+upserts.
+    # This keeps GitHub fetching and local embedding running concurrently.
+    _SENTINEL = object()
+    fetch_queue: queue.Queue = queue.Queue(maxsize=3)
+    fetch_error: list[Exception] = []
+
+    def _fetch_worker() -> None:
+        try:
+            for batch in fetcher.stream_prs(limit=limit):
+                fetch_queue.put(batch)
+        except Exception as exc:
+            fetch_error.append(exc)
+        finally:
+            fetch_queue.put(_SENTINEL)
+
+    threading.Thread(target=_fetch_worker, daemon=True).start()
+
+    total_prs = total_chunks = total_new = 0
 
     with Progress(
         SpinnerColumn(),
@@ -203,44 +227,51 @@ def _cmd_ingest(args: list[str], session: dict[str, Any]) -> None:
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        # Stage 1: Fetch
-        fetch_label = f"[{CYAN}]Fetching PRs (limit: {limit})...[/]" if limit else f"[{CYAN}]Fetching all PRs...[/]"
-        t_fetch = progress.add_task(fetch_label, total=None)
-        fetcher = GitHubFetcher(token=token, repo_str=repo)
-        prs = fetcher.fetch_prs(limit=limit)
-        progress.update(t_fetch, description=f"[{CYAN}]Fetched {len(prs)} PRs[/]", total=1, completed=1)
-
-        # Stage 2: Chunk
-        t_chunk = progress.add_task(f"[{CYAN}]Chunking PRs...[/]", total=len(prs))
-        all_chunks = []
-        for pr in prs:
-            all_chunks.extend(chunk_pr(pr, repo=repo))
-            progress.advance(t_chunk)
-        progress.update(t_chunk, description=f"[{CYAN}]Chunked → {len(all_chunks)} chunks[/]")
-
-        # Stage 3: Embed (all-at-once encoding, indeterminate)
-        vs = VectorStore(collection_name=collection)
-        embedder = Embedder()
-        approx_batches = max(1, (len(all_chunks) + 63) // 64)
+        t_prs = progress.add_task(f"[{CYAN}]Fetching PRs...[/]", total=limit)
         t_embed = progress.add_task(f"[{CYAN}]Embedding...[/]", total=None)
-        t_upsert = progress.add_task(f"[{CYAN}]Upserting...[/]", total=approx_batches)
+        t_upsert = progress.add_task(f"[{CYAN}]Upserting...[/]", total=None)
 
-        def _on_upsert(done: int, total: int) -> None:
-            progress.update(t_embed, total=1, completed=1,
-                            description=f"[{CYAN}]Embedded ✓[/]")
-            progress.update(t_upsert, completed=done, total=total,
+        while True:
+            batch = fetch_queue.get()
+            if batch is _SENTINEL:
+                break
+
+            total_prs += len(batch)
+            progress.update(t_prs, completed=total_prs,
+                            description=f"[{CYAN}]Fetched {total_prs} PRs...[/]")
+
+            batch_chunks: list = []
+            for pr in batch:
+                batch_chunks.extend(chunk_pr(pr, repo=repo))
+            total_chunks += len(batch_chunks)
+
+            approx_batches = max(1, (len(batch_chunks) + 63) // 64)
+            progress.update(t_embed, completed=0, description=f"[{CYAN}]Embedding...[/]")
+            progress.update(t_upsert, total=approx_batches, completed=0,
                             description=f"[{CYAN}]Upserting...[/]")
 
-        n = embedder.embed_chunks(all_chunks, vs, progress_callback=_on_upsert)
-        # Mark embed done if no callback fired (e.g. all chunks existed)
-        progress.update(t_embed, total=1, completed=1,
-                        description=f"[{CYAN}]Embedded ✓[/]")
-        progress.update(t_upsert, completed=approx_batches,
-                        description=f"[{CYAN}]Upserted {n} new chunks[/]")
+            def _on_upsert(done: int, total: int) -> None:
+                progress.update(t_embed, total=1, completed=1,
+                                description=f"[{CYAN}]Embedded ✓[/]")
+                progress.update(t_upsert, completed=done, total=total,
+                                description=f"[{CYAN}]Upserting...[/]")
+
+            n = embedder.embed_chunks(batch_chunks, vs, progress_callback=_on_upsert)
+            progress.update(t_embed, total=1, completed=1,
+                            description=f"[{CYAN}]Embedded ✓[/]")
+            progress.update(t_upsert, completed=approx_batches,
+                            description=f"[{CYAN}]Upserted {n} new[/]")
+            total_new += n
+
+        progress.update(t_prs, total=total_prs, completed=total_prs,
+                        description=f"[{CYAN}]Fetched {total_prs} PRs ✓[/]")
+
+    if fetch_error:
+        console.print(f"[yellow]⚠ Fetch error: {fetch_error[0]}[/yellow]")
 
     console.print(
-        f"[green]✓[/green] Ingested [bold]{len(prs)}[/bold] PRs "
-        f"([bold]{len(all_chunks)}[/bold] chunks, [bold]{n}[/bold] new) "
+        f"[green]✓[/green] Ingested [bold]{total_prs}[/bold] PRs "
+        f"([bold]{total_chunks}[/bold] chunks, [bold]{total_new}[/bold] new) "
         f"from [bold]{repo}[/bold]"
     )
     session["active_repo"] = repo
@@ -513,7 +544,15 @@ def _cmd_clear(args: list[str], session: dict[str, Any]) -> None:
         return
 
     VectorStore(collection_name=collection).delete_collection()
-    console.print(f"[green]✓ Cleared collection for [bold]{repo}[/bold].[/green]")
+
+    import shutil
+    slug = repo.replace("/", "_")
+    cache_path = pathlib.Path("cache") / slug
+    if cache_path.exists():
+        shutil.rmtree(cache_path)
+        console.print(f"[green]✓ Cleared collection and cache for [bold]{repo}[/bold].[/green]")
+    else:
+        console.print(f"[green]✓ Cleared collection for [bold]{repo}[/bold].[/green]")
 
     if session.get("active_collection") == collection:
         session["active_repo"] = None
@@ -816,6 +855,11 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    try:
+        with Status(f"[{CYAN}]Loading models...[/]", console=console):
+            import models  # noqa: F401 — triggers singleton loading
+    except KeyboardInterrupt:
+        sys.exit(0)
     _print_banner()
     session: dict[str, Any] = {"active_repo": None, "active_collection": None}
     _repl(session)

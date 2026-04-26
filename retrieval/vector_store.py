@@ -23,7 +23,9 @@ def _chunk_id_to_uuid(chunk_id: str) -> str:
 class VectorStore:
     """Thin wrapper around QdrantClient for PR chunk storage and retrieval."""
 
-    def __init__(self, collection_name: str, vector_size: int = 384) -> None:
+    # IMPORTANT: dimension must match the embedding model in models.py
+    # BAAI/bge-base-en-v1.5 = 768, all-MiniLM-L6-v2 = 384
+    def __init__(self, collection_name: str, vector_size: int = 768) -> None:
         host = os.getenv("QDRANT_HOST", "localhost")
         port = int(os.getenv("QDRANT_PORT", "6333"))
         self.collection_name = collection_name

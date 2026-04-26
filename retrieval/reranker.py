@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from sentence_transformers import CrossEncoder
+from models import RERANKER as _model
 
 logger = logging.getLogger(__name__)
 
@@ -11,9 +11,8 @@ logger = logging.getLogger(__name__)
 class Reranker:
     """Reranks retrieved chunks using a cross-encoder relevance model."""
 
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2") -> None:
-        logger.info("Loading reranker model: %s", model_name)
-        self.model = CrossEncoder(model_name)
+    def __init__(self) -> None:
+        pass
 
     def rerank(
         self,
@@ -34,7 +33,7 @@ class Reranker:
         unique_chunks = list(seen.values())
 
         pairs = [(query, c.get("text", "")) for c in unique_chunks]
-        scores = self.model.predict(pairs)
+        scores = _model.predict(pairs)
 
         for chunk, score in zip(unique_chunks, scores):
             chunk["rerank_score"] = float(score)

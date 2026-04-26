@@ -4,7 +4,7 @@ import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from sentence_transformers import SentenceTransformer
+from models import EMBEDDER as _model
 
 from ingestion.chunker import Chunk
 from retrieval.vector_store import VectorStore
@@ -17,9 +17,8 @@ _UPSERT_WORKERS = 4
 class Embedder:
     """Embeds text chunks and upserts them into a VectorStore, skipping existing IDs."""
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2") -> None:
-        logger.info("Loading embedding model: %s", model_name)
-        self.model = SentenceTransformer(model_name)
+    def __init__(self) -> None:
+        pass
 
     def embed_chunks(
         self,
@@ -40,7 +39,7 @@ class Embedder:
             return 0
 
         texts = [c.text for c in new_chunks]
-        vectors = self.model.encode(
+        vectors = _model.encode(
             texts,
             batch_size=batch_size,
             show_progress_bar=False,
@@ -90,4 +89,5 @@ class Embedder:
 
     def embed_query(self, query: str) -> list[float]:
         """Embed a single query string for search."""
-        return self.model.encode(query, convert_to_numpy=True).tolist()
+        prefixed = f"Represent this sentence for searching relevant passages: {query}"
+        return _model.encode(prefixed, convert_to_numpy=True).tolist()

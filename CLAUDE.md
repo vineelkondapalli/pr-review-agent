@@ -37,7 +37,7 @@ main.py             CLI entrypoint
 
 ## Key details
 
-- Embedding model: `all-MiniLM-L6-v2` (384-dim, local)
+- Embedding model: `BAAI/bge-base-en-v1.5` (768-dim, local)
 - Reranker: `cross-encoder/ms-marco-MiniLM-L-6-v2`
 - LLM: `claude-haiku-4-5-20251001`
 - Chunk types: `metadata`, `diff`, `review_comment`

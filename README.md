@@ -1,8 +1,10 @@
-# PR Review Agent
+# Revue
+
+![Revue CLI](cli-image.png)
 
 An AI-powered code review agent that retrieves semantically similar past PRs, relevant code patterns, and historical review comments from a repository's history, then synthesizes a grounded, cited code review for any incoming PR diff.
 
-Exposed as both a CLI and an MCP server — callable directly from Claude Code or Cursor mid-session.
+Exposed as both an interactive CLI REPL and an MCP server — callable directly from Claude Code or Cursor mid-session.
 
 ---
 
@@ -38,7 +40,7 @@ GitHub Repo
                Verified Markdown Review
                     ┌────┴────┐
                     ▼         ▼
-                  CLI       MCP Server
+              Revue REPL    MCP Server
                            (Claude Code / Cursor)
 ```
 
@@ -53,10 +55,10 @@ GitHub Repo
 | Embeddings      | sentence-transformers `all-MiniLM-L6-v2`     |
 | Vector DB       | Qdrant (local via Docker)                    |
 | Reranking       | `cross-encoder/ms-marco-MiniLM-L-6-v2`       |
-| Agent LLM       | Claude `claude-haiku-4-5-20251001`            |
-| MCP Server      | official `mcp` Python SDK                    |
+| Agent LLM       | Claude `claude-haiku-4-5-20251001`           |
+| MCP Server      | official `mcp` Python SDK                   |
+| CLI             | rich                                         |
 | Config          | python-dotenv                                |
-| Eval            | custom pytest-based harness                  |
 
 ---
 
@@ -71,7 +73,10 @@ cd pr-review-agent
 conda create -n pr-review-agent python=3.11
 conda activate pr-review-agent
 pip install -r requirements.txt
+pip install -e .
 ```
+
+`pip install -e .` registers the `revue` command so you can launch the REPL from anywhere.
 
 ### 2. Start Qdrant
 
@@ -94,27 +99,80 @@ cp .env.example .env
 
 ## Usage
 
-### Ingest a repository's PR history
+Launch the REPL:
 
 ```bash
-python main.py ingest --repo owner/repo --limit 200
+revue
 ```
 
-This fetches the last 200 closed PRs, chunks them into metadata/diff/review-comment chunks, embeds them with `all-MiniLM-L6-v2`, and upserts into Qdrant. Idempotent — safe to re-run.
+```
+ ██████╗ ███████╗██╗   ██╗██╗   ██╗███████╗
+ ██╔══██╗██╔════╝██║   ██║██║   ██║██╔════╝
+ ██████╔╝█████╗  ██║   ██║██║   ██║█████╗
+ ██╔══██╗██╔══╝  ╚██╗ ██╔╝██║   ██║██╔══╝
+ ██║  ██║███████╗ ╚████╔╝ ╚██████╔╝███████╗
+ ╚═╝  ╚═╝╚══════╝  ╚═══╝   ╚═════╝ ╚══════╝
 
-### Review a specific PR
-
-```bash
-python main.py review --repo owner/repo --pr 42
+◆ revue >
 ```
 
-Runs the full 4-agent pipeline (Planner → Executor → Synthesizer → Critic) and prints a markdown review with citations like `[PR #17]` and `[ref: auth.py]`.
+### Commands
 
-### Start the MCP server
+| Command | Arguments | Description |
+|---|---|---|
+| `ingest` | `<owner/repo> [--limit N]` | Ingest PR history into Qdrant |
+| `use` | `<owner/repo>` | Set active repo (must already be ingested) |
+| `review` | `<pr_number>` | Review a PR using the active repo |
+| `review` | `<owner/repo> <pr_number>` | Review a PR in any repo |
+| `chat` | `[message]` | RAG chat about the repo's PR history |
+| `collections` | | List all Qdrant collections |
+| `clear` | `<owner/repo>` | Delete a Qdrant collection |
+| `eval` | `[--repo R] [--limit N] [--holdout N]` | Run evaluation harness |
+| `serve` | | Start MCP server on stdio |
+| `help` | | Show command reference |
+| `exit` / `quit` | | Exit Revue |
 
-```bash
-python main.py serve
+### Typical session
+
 ```
+◆ revue > ingest encode/httpx --limit 100
+✓ Ingested 100 PRs (312 chunks, 312 new) from encode/httpx
+
+◆ revue [httpx] > review 1234
+...renders markdown review with verdict + citations...
+
+◆ revue [httpx] > chat
+  chat > What's the most common review pattern in this repo?
+...streams answer grounded in PR history...
+
+◆ revue [httpx] > use encode/httpx
+✓ Active repo set to encode/httpx.
+```
+
+### Re-ingesting is idempotent
+
+Chunks are keyed by SHA-256 of `repo:pr:type:file` — re-running `ingest` skips existing chunks and only upserts new ones. GitHub responses are also cached under `cache/` so repeated runs don't hit the API.
+
+### Session state
+
+Once a repo is ingested (or `use`d), it becomes the **active repo** for the session. The prompt updates to show it: `◆ revue [httpx] >`. Commands `review`, `chat`, and `eval` use the active repo automatically.
+
+---
+
+## Chat
+
+The `chat` command drops into a multi-turn conversational interface grounded in the ingested PR history:
+
+```
+◆ revue [httpx] > chat
+  chat > What is the most common review comment in this repo?
+  chat > How does this codebase handle authentication?
+  chat > Have there been any PRs about rate limiting?
+```
+
+- Responses stream live to the terminal via `rich.live.Live`
+- Each answer includes a **Context Sources** panel listing cited PR numbers and relevance scores
+- Type `reset` to clear conversation history, `exit` or `back` to return to the main REPL
 
 ---
 
@@ -122,7 +180,7 @@ python main.py serve
 
 ### Claude Code
 
-Add to your Claude Code MCP config (usually `~/.claude/claude_desktop_config.json` or the project `.mcp.json`):
+Add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json` or `.mcp.json`):
 
 ```json
 {
@@ -143,7 +201,7 @@ Then in Claude Code, the `review_pr` tool is available:
 
 > "Review this PR diff for owner/repo"
 
-The tool signature:
+Tool signature:
 ```
 review_pr(diff: str, repo: str) -> str
 ```
@@ -157,22 +215,20 @@ Add the same JSON block under `mcpServers` in your Cursor MCP settings.
 ## Evaluation
 
 ```bash
+# From the REPL
+◆ revue [httpx] > eval --limit 200 --holdout 30
+
+# Or directly
 python eval/evaluate.py --repo owner/repo --holdout 30 --limit 200
 ```
 
 Ingests all but the last 30 PRs, then runs the full pipeline on each holdout PR and reports:
 
-| Metric             | Description                                                           |
-|--------------------|-----------------------------------------------------------------------|
-| Retrieval Recall   | Fraction of human-referenced PRs that appear in the top-20 chunks    |
-| Citation Accuracy  | % of reviews where the Critic found no hallucinated citations         |
-| Review Relevance   | LLM-as-judge score (1–5) for review specificity and usefulness        |
-
-### Eval Results
-
-| Repo | Recall | Citation Acc. | Avg Relevance |
-|------|--------|---------------|---------------|
-| *(run eval and fill in)* | | | |
+| Metric | Description |
+|---|---|
+| Retrieval Recall | Fraction of human-referenced PRs that appear in the top-20 chunks |
+| Citation Accuracy | Whether the Critic found no hallucinated citations |
+| Review Relevance | LLM-as-judge score (1–5) for specificity and usefulness |
 
 ---
 
@@ -181,7 +237,7 @@ Ingests all but the last 30 PRs, then runs the full pipeline on each holdout PR 
 ```
 pr-review-agent/
 ├── ingestion/
-│   ├── github_fetcher.py   # PyGithub wrapper with rate-limit retry
+│   ├── github_fetcher.py   # PyGithub wrapper with caching + concurrency
 │   ├── chunker.py          # metadata / diff / review_comment chunks
 │   └── embedder.py         # sentence-transformers + idempotent upsert
 ├── retrieval/
@@ -191,12 +247,14 @@ pr-review-agent/
 │   ├── planner.py          # Claude → structured sub-queries (JSON)
 │   ├── executor.py         # multi-query retrieval + rerank
 │   ├── synthesizer.py      # Claude → grounded markdown review
-│   └── critic.py           # Claude → citation verification + cleanup
+│   ├── critic.py           # Claude → citation verification + cleanup
+│   └── chat.py             # multi-turn RAG chatbot with streaming
 ├── mcp_server/
 │   └── server.py           # MCP tool: review_pr(diff, repo)
 ├── eval/
 │   └── evaluate.py         # holdout eval harness
-├── main.py                 # CLI (ingest / review / serve)
+├── main.py                 # Revue REPL entrypoint
+├── pyproject.toml          # revue entry point (pip install -e .)
 ├── docker-compose.yml      # Qdrant service
 └── requirements.txt
 ```

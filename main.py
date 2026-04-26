@@ -15,6 +15,10 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from dotenv import load_dotenv
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion, WordCompleter
+from prompt_toolkit.formatted_text import ANSI as PT_ANSI
+from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -385,24 +389,24 @@ def _cmd_chat(args: list[str], session: dict[str, Any]) -> None:
 
     # Optional inline message: `chat what is the auth pattern?`
     pending: str | None = " ".join(args).strip() if args else None
+    chat_pt = PromptSession(
+        history=InMemoryHistory(),
+        completer=_CHAT_COMPLETER,
+    )
+    _chat_prompt = PT_ANSI(f"\033[38;2;6;182;212m  chat > \033[0m")
 
     while True:
         if pending:
             question = pending
             pending = None
         else:
-            chat_prompt = Text()
-            chat_prompt.append("  chat > ", style=f"{CYAN} bold")
-            console.print(chat_prompt, end="")
-            sys.stdout.flush()
             try:
-                line = sys.stdin.readline()
+                question = chat_pt.prompt(_chat_prompt)
             except KeyboardInterrupt:
-                console.print()
                 break
-            if not line:
+            except EOFError:
                 break
-            question = line.strip()
+            question = question.strip()
             if not question:
                 continue
 
@@ -689,19 +693,85 @@ COMMANDS: dict[str, Any] = {
     "quit": _cmd_exit,
 }
 
+# Commands whose second positional argument is an owner/repo
+_REPO_COMMANDS = {"ingest", "use", "review", "clear"}
+
+
+class _RevueCompleter(Completer):
+    """Tab-completes command names and owner/repo arguments from ingested collections."""
+
+    def __init__(self) -> None:
+        self._repos: list[str] | None = None
+
+    def invalidate(self) -> None:
+        self._repos = None
+
+    def _load_repos(self) -> list[str]:
+        if self._repos is None:
+            try:
+                from retrieval.vector_store import VectorStore
+                cols = VectorStore.list_collections()
+                self._repos = [c["name"].replace("_", "/", 1) for c in cols]
+            except Exception:
+                self._repos = []
+        return self._repos
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        words = text.split()
+        at_space = text.endswith(" ")
+
+        # First word: complete command names
+        if not at_space and len(words) <= 1:
+            partial = words[0] if words else ""
+            for cmd in sorted(COMMANDS):
+                if cmd.startswith(partial):
+                    yield Completion(cmd, start_position=-len(partial))
+            return
+
+        if not words:
+            return
+
+        cmd = words[0].lower()
+        if cmd not in _REPO_COMMANDS:
+            return
+
+        # Second positional word: complete owner/repo from ingested collections
+        on_second = (at_space and len(words) == 1) or (not at_space and len(words) == 2)
+        if not on_second:
+            return
+
+        partial = "" if at_space else words[1]
+        for repo in self._load_repos():
+            if repo.startswith(partial):
+                yield Completion(repo, start_position=-len(partial))
+
+
+_CHAT_COMPLETER = WordCompleter(["exit", "back", "reset", "quit"], ignore_case=True)
+
+
+def _pt_main_prompt(session: dict[str, Any]) -> PT_ANSI:
+    """Build the styled REPL prompt string for prompt_toolkit."""
+    active_repo = session.get("active_repo")
+    p = "\033[38;2;139;92;246m◆ revue"
+    if active_repo:
+        name = active_repo.split("/")[-1]
+        p += f" [\033[38;2;6;182;212m{name}\033[38;2;139;92;246m]"
+    p += " > \033[0m"
+    return PT_ANSI(p)
+
 
 def _repl(session: dict[str, Any]) -> None:
+    completer = _RevueCompleter()
+    pt = PromptSession(history=InMemoryHistory(), completer=completer)
+
     while True:
-        console.print(_make_prompt(session), end="")
-        sys.stdout.flush()
-
         try:
-            line = sys.stdin.readline()
+            line = pt.prompt(_pt_main_prompt(session))
         except KeyboardInterrupt:
-            console.print(f"\n[dim]Use 'exit' to quit.[/dim]")
+            console.print("[dim]Use 'exit' to quit.[/dim]")
             continue
-
-        if not line:  # EOF / Ctrl-D
+        except EOFError:
             _cmd_exit([], session)
             return
 
@@ -724,8 +794,10 @@ def _repl(session: dict[str, Any]) -> None:
             result = COMMANDS[cmd](cmd_args, session)
             if result == "EXIT":
                 return
+            if cmd in ("ingest", "clear"):
+                completer.invalidate()
         except KeyboardInterrupt:
-            console.print(f"\n[dim]Interrupted.[/dim]")
+            console.print("[dim]Interrupted.[/dim]")
         except Exception as exc:
             console.print(
                 Panel(

@@ -135,9 +135,10 @@ class VectorStore:
         result = []
         for c in client.get_collections().collections:
             info = client.get_collection(c.name)
+            count = getattr(info, "points_count", None) or getattr(info, "vectors_count", None) or 0
             result.append({
                 "name": c.name,
-                "vectors_count": info.vectors_count or 0,
+                "vectors_count": count,
                 "status": str(info.status),
             })
         return result

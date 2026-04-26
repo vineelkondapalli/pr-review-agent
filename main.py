@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import sys
 from typing import Any
+
+# Ensure the project root is importable when running as an installed entry point.
+# (sys.path already includes the cwd for `python main.py`, but not for `revue`.)
+_PROJECT_ROOT = str(pathlib.Path(__file__).parent.resolve())
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from dotenv import load_dotenv
 from rich.console import Console

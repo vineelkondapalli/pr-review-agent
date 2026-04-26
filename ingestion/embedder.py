@@ -1,7 +1,7 @@
 """Embeds PR chunks using sentence-transformers and upserts them into Qdrant."""
 
 import logging
-from typing import TYPE_CHECKING
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sentence_transformers import SentenceTransformer
 
@@ -9,6 +9,8 @@ from ingestion.chunker import Chunk
 from retrieval.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+
+_UPSERT_WORKERS = 4
 
 
 class Embedder:
@@ -24,7 +26,7 @@ class Embedder:
         vector_store: VectorStore,
         batch_size: int = 64,
     ) -> int:
-        """Embed and upsert new chunks; skip any already present in the vector store."""
+        """Embed chunks in batches of `batch_size` and upsert batches to Qdrant in parallel."""
         if not chunks:
             return 0
 
@@ -43,20 +45,39 @@ class Embedder:
             convert_to_numpy=True,
         )
 
-        upsert_payloads = [
-            {
-                "id": chunk.id,
-                "text": chunk.text,
-                "vector": vec.tolist(),
-                "metadata": chunk.metadata,
-            }
-            for chunk, vec in zip(new_chunks, vectors)
-        ]
-        vector_store.upsert(upsert_payloads)
+        # Build batched upsert payloads
+        batches: list[list[dict]] = []
+        for batch_start in range(0, len(new_chunks), batch_size):
+            batch_chunks = new_chunks[batch_start : batch_start + batch_size]
+            batch_vecs = vectors[batch_start : batch_start + batch_size]
+            batches.append([
+                {
+                    "id": chunk.id,
+                    "text": chunk.text,
+                    "vector": vec.tolist(),
+                    "metadata": chunk.metadata,
+                }
+                for chunk, vec in zip(batch_chunks, batch_vecs)
+            ])
+
+        # Parallelize upserts across batches
+        errors = 0
+        with ThreadPoolExecutor(max_workers=_UPSERT_WORKERS) as pool:
+            futures = {pool.submit(vector_store.upsert, batch): i for i, batch in enumerate(batches)}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:
+                    errors += 1
+                    logger.error("Upsert batch %d failed: %s", futures[future], exc)
+
+        if errors:
+            logger.warning("%d upsert batch(es) failed out of %d", errors, len(batches))
 
         logger.info(
-            "Embedded %d new chunks, skipped %d existing",
+            "Embedded %d new chunks in %d batches, skipped %d existing",
             len(new_chunks),
+            len(batches),
             len(existing_ids),
         )
         return len(new_chunks)

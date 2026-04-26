@@ -71,7 +71,7 @@ def _get_diff(pr_obj) -> str:
 def _judge_relevance(client: anthropic.Anthropic, diff: str, review: str) -> int:
     try:
         resp = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=8,
             messages=[{
                 "role": "user",

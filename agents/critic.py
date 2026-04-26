@@ -9,7 +9,7 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-4-20250514"
+MODEL = "claude-haiku-4-5-20251001"
 
 SYSTEM_PROMPT = """You are a citation verifier for AI-generated code reviews.
 

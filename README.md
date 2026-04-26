@@ -53,7 +53,7 @@ GitHub Repo
 | Embeddings      | sentence-transformers `all-MiniLM-L6-v2`     |
 | Vector DB       | Qdrant (local via Docker)                    |
 | Reranking       | `cross-encoder/ms-marco-MiniLM-L-6-v2`       |
-| Agent LLM       | Claude `claude-sonnet-4-20250514`             |
+| Agent LLM       | Claude `claude-haiku-4-5-20251001`            |
 | MCP Server      | official `mcp` Python SDK                    |
 | Config          | python-dotenv                                |
 | Eval            | custom pytest-based harness                  |

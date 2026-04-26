@@ -267,7 +267,13 @@ def _cmd_ingest(args: list[str], session: dict[str, Any]) -> None:
                         description=f"[{CYAN}]Fetched {total_prs} PRs ✓[/]")
 
     if fetch_error:
-        console.print(f"[yellow]⚠ Fetch error: {fetch_error[0]}[/yellow]")
+        console.print(Panel(
+            f"[red]{fetch_error[0]}[/red]",
+            title="[red bold]Fetch Error[/red bold]",
+            border_style="red",
+        ))
+        if total_prs == 0:
+            return
 
     console.print(
         f"[green]✓[/green] Ingested [bold]{total_prs}[/bold] PRs "

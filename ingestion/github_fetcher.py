@@ -176,8 +176,9 @@ class GitHubFetcher:
         Each iteration makes 1 GraphQL call (metadata + comments for up to 100 PRs)
         then 1 REST call per uncached PR for file patches.
         Bots are filtered before any REST calls are made.
+        `limit` counts non-bot PRs actually yielded, not raw GitHub pages.
         """
-        count = 0
+        yielded = 0
         cursor: Optional[str] = None
 
         while True:
@@ -186,20 +187,20 @@ class GitHubFetcher:
             if not page:
                 break
 
-            # Apply hard limit before bot filter so limit semantics are consistent
-            if limit is not None:
-                page = page[: max(0, limit - count)]
-            count += len(page)
-
-            # Skip bots — no REST call wasted on them
+            # Filter bots first — no REST call wasted on them
             to_resolve = [p for p in page if not _is_bot_author(p["author"])]
+
+            # Trim to remaining limit (counted in non-bot PRs)
+            if limit is not None:
+                to_resolve = to_resolve[: max(0, limit - yielded)]
 
             if to_resolve:
                 batch = self._resolve_files(to_resolve)
                 if batch:
                     yield batch
+                    yielded += len(batch)
 
-            if not has_next or (limit is not None and count >= limit):
+            if not has_next or (limit is not None and yielded >= limit):
                 break
 
     @retry(

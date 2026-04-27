@@ -9,3 +9,12 @@ build/
 *.pyc
 .DS_Store
 cache/
+
+# Claude Code local settings (machine-specific overrides)
+.claude/settings.local.json
+
+# MCP local config (contains machine-specific paths/settings)
+.mcp.json
+
+# Logs
+*.log

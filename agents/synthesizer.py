@@ -9,16 +9,17 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5-20251001"
+MODEL = "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = """You are an expert code reviewer with deep knowledge of software engineering best practices.
 
 Your task: given an incoming PR diff and a set of retrieved context chunks from past PRs in the same repository, write a thorough, grounded code review.
 
 Rules:
-- Every specific claim, suggestion, or pattern observation MUST include a citation.
-- Use [PR #N] to cite a past PR number, or [ref: filename] to cite a file from context.
-- If you have no relevant context for a claim, do not make the claim.
+- When retrieved context is provided, every specific claim, suggestion, or pattern observation MUST cite it.
+  Use [PR #N] to cite a past PR number, or [ref: filename] to cite a file from context.
+- When NO retrieved context is provided (the context section is empty), write your review based on the
+  diff alone. Do NOT fabricate citations. Omit all [PR #N] and [ref: ...] markers entirely.
 - Structure your review with these exact markdown headers:
   ## Summary
   ## Per-File Comments
@@ -109,20 +110,34 @@ def _parse_result(markdown: str) -> SynthesisResult:
 class Synthesizer:
     """Writes a grounded PR review citing retrieved context chunks."""
 
-    def __init__(self, client: anthropic.Anthropic) -> None:
+    def __init__(self, client: anthropic.Anthropic, model: str = MODEL) -> None:
         self.client = client
+        self.model = model
 
     def synthesize(self, pr_diff: str, context_chunks: list[dict[str, Any]]) -> SynthesisResult:
         context_text = _format_context(context_chunks)
+        valid_pr_nums = sorted({c.get("pr_number") for c in context_chunks if c.get("pr_number")})
+        valid_filenames = sorted({c.get("filename") for c in context_chunks if c.get("filename")})
+        citation_parts = []
+        if valid_pr_nums:
+            citation_parts.append("PR numbers: " + ", ".join(f"[PR #{n}]" for n in valid_pr_nums))
+        if valid_filenames:
+            citation_parts.append("Filenames: " + ", ".join(f"[ref: {f}]" for f in valid_filenames))
+        citation_note = (
+            "\n\n## Valid Citations\n\nYou may ONLY use citations from this list:\n"
+            + "\n".join(citation_parts)
+            if citation_parts else ""
+        )
         user_message = (
             f"## Incoming PR Diff\n\n```diff\n{pr_diff}\n```\n\n"
             f"## Retrieved Context from Past PRs\n\n{context_text}"
+            f"{citation_note}"
         )
 
         for attempt in range(3):
             try:
                 response = self.client.messages.create(
-                    model=MODEL,
+                    model=self.model,
                     max_tokens=4096,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_message}],

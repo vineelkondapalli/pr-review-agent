@@ -7,7 +7,6 @@ Usage:
 import argparse
 import logging
 import os
-import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -57,9 +56,6 @@ class EvalRecord:
     relevance_score: int
 
 
-def _extract_pr_references(text: str) -> set[int]:
-    return {int(m) for m in re.findall(r"#(\d+)", text)}
-
 
 def _get_diff(pr_obj) -> str:
     parts = []
@@ -69,10 +65,10 @@ def _get_diff(pr_obj) -> str:
     return "\n\n".join(parts)
 
 
-def _judge_relevance(client: anthropic.Anthropic, diff: str, review: str) -> int:
+def _judge_relevance(client: anthropic.Anthropic, diff: str, review: str, model: str = "claude-sonnet-4-6") -> int:
     try:
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=model,
             max_tokens=8,
             messages=[{
                 "role": "user",
@@ -85,10 +81,11 @@ def _judge_relevance(client: anthropic.Anthropic, diff: str, review: str) -> int
 
 
 class EvalRunner:
-    def __init__(self, repo_str: str, holdout: int = 30, limit: int = 200) -> None:
+    def __init__(self, repo_str: str, holdout: int = 30, limit: int = 200, model: str = "claude-sonnet-4-6") -> None:
         self.repo_str = repo_str
         self.holdout = holdout
         self.limit = limit
+        self.model = model
         self.collection = repo_str.replace("/", "_") + "_eval"
 
     def run(self, progress_callback: Callable[[str, int, int], None] | None = None) -> list[EvalRecord]:
@@ -116,17 +113,23 @@ class EvalRunner:
         if progress_callback:
             progress_callback("ingest", 1, 1)
 
-        planner = Planner(client)
+        planner = Planner(client, model=self.model)
         executor = Executor(vs, embedder, reranker)
-        synthesizer = Synthesizer(client)
-        critic = Critic(client)
+        synthesizer = Synthesizer(client, model=self.model)
+        critic = Critic(client, model=self.model)
+
+        # Build file → training PR index for recall ground truth.
+        # A training PR is "relevant" to a holdout PR if they share at least one file.
+        file_to_train_prs: dict[str, set[int]] = {}
+        for pr in train_prs:
+            for f in pr.files:
+                file_to_train_prs.setdefault(f.filename, set()).add(pr.pr_number)
 
         # Fetch holdout PRs via PyGithub for diff access
         gh = Github(auth=Auth.Token(token))
         gh_repo = gh.get_repo(self.repo_str)
 
         records: list[EvalRecord] = []
-        train_pr_numbers = {pr.pr_number for pr in train_prs}
         done = 0
 
         for pr_data in holdout_prs:
@@ -136,17 +139,14 @@ class EvalRunner:
                 if not diff.strip():
                     continue
 
-                # Ground truth: PR numbers referenced in review comments
+                # Ground truth: training PRs that touched at least one of the same files.
                 gt_refs: set[int] = set()
-                for rc in pr_data.review_comments:
-                    gt_refs |= _extract_pr_references(rc.body)
-                for comment in pr_data.general_comments:
-                    gt_refs |= _extract_pr_references(comment)
-                gt_refs &= train_pr_numbers  # only count refs to training PRs
+                for f in pr_data.files:
+                    gt_refs |= file_to_train_prs.get(f.filename, set())
 
                 # Run pipeline
                 plan = planner.plan(diff)
-                context_chunks = executor.execute(plan)
+                context_chunks = executor.execute(plan, pr_number_lt=pr_data.pr_number)
                 synthesis = synthesizer.synthesize(diff, context_chunks)
                 final = critic.verify(synthesis.raw_markdown, context_chunks)
 
@@ -161,7 +161,7 @@ class EvalRunner:
                     pr_number=pr_data.pr_number,
                     retrieval_recall=recall,
                     citation_accurate=final.verified,
-                    relevance_score=_judge_relevance(client, diff, final.cleaned_review),
+                    relevance_score=_judge_relevance(client, diff, final.cleaned_review, model=self.model),
                 )
                 records.append(record)
 
@@ -181,9 +181,10 @@ def main() -> None:
     parser.add_argument("--repo", required=True, help="GitHub repo (owner/repo)")
     parser.add_argument("--holdout", type=int, default=30, help="Number of holdout PRs")
     parser.add_argument("--limit", type=int, default=200, help="Total PRs to fetch")
+    parser.add_argument("--model", default="claude-sonnet-4-6", help="Claude model ID to use")
     args = parser.parse_args()
 
-    runner = EvalRunner(args.repo, holdout=args.holdout, limit=args.limit)
+    runner = EvalRunner(args.repo, holdout=args.holdout, limit=args.limit, model=args.model)
     runner.run()
 
 

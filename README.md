@@ -129,9 +129,10 @@ revue
 | `review` | `<pr_number>` | Review a PR using the active repo |
 | `review` | `<owner/repo> <pr_number>` | Review a PR in any repo |
 | `chat` | `[message]` | RAG chat about the repo's PR history |
+| `model` | `[haiku \| sonnet \| opus]` | Show or switch the Claude model used by review/chat/eval |
 | `collections` | | List all Qdrant collections |
 | `clear` | `<owner/repo>` | Delete a Qdrant collection |
-| `eval` | `[--repo R] [--limit N] [--holdout N]` | Run evaluation harness |
+| `eval` | `[--repo R] [--limit N] [--holdout N] [--model M]` | Run evaluation harness |
 | `serve` | | Start MCP server on stdio |
 | `help` | | Show command reference |
 | `exit` / `quit` | | Exit Revue |
@@ -184,22 +185,21 @@ The `chat` command drops into a multi-turn conversational interface grounded in 
 
 ### Claude Code
 
-Add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json` or `.mcp.json`):
+Add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json` or a project-local `.mcp.json`). Use the absolute path to the conda env's Python so the server has access to all dependencies:
 
 ```json
 {
   "mcpServers": {
     "pr-review": {
-      "command": "python",
+      "command": "/absolute/path/to/conda/envs/pr-review-agent/python",
       "args": ["main.py", "serve"],
-      "cwd": "/absolute/path/to/pr-review-agent",
-      "env": {
-        "PYTHONPATH": "/absolute/path/to/pr-review-agent"
-      }
+      "cwd": "/absolute/path/to/pr-review-agent"
     }
   }
 }
 ```
+
+On first start the server loads the embedding and reranker models synchronously before accepting tool calls (takes ~15–20s). Subsequent calls reuse the loaded models and shared Qdrant connections.
 
 Then in Claude Code, the `review_pr` tool is available:
 
@@ -207,8 +207,15 @@ Then in Claude Code, the `review_pr` tool is available:
 
 Tool signature:
 ```
-review_pr(diff: str, repo: str) -> str
+review_pr(
+    diff: str,
+    repo: str,
+    model: str = "sonnet",       # "haiku" | "sonnet" | "opus" or full model ID
+    ingest_limit: int = 200,     # used only if the repo has not been ingested yet
+) -> str
 ```
+
+If the requested repo's collection is empty, the server will ingest up to `ingest_limit` PRs automatically before running the review.
 
 ### Cursor
 

@@ -2,31 +2,14 @@
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import anthropic
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5-20251001"
-
-SYSTEM_PROMPT = """You are a citation verifier for AI-generated code reviews.
-
-Your task: check whether every citation in the review exists in the provided list of valid references.
-
-A citation looks like [PR #N] or [ref: filename].
-A valid PR citation [PR #N] is valid only if PR number N appears in the valid PR numbers list.
-A valid file citation [ref: filename] is valid only if that filename appears in the valid filenames list.
-
-Return ONLY valid JSON:
-{
-  "hallucinated_refs": ["[PR #99]", "[ref: fake.py]"],
-  "explanation": "brief explanation of what was hallucinated"
-}
-
-If everything checks out, return: {"hallucinated_refs": [], "explanation": "All citations verified."}
-"""
+MODEL = "claude-sonnet-4-6"
 
 CLEAN_PROMPT = """Remove or rewrite any sentences containing these hallucinated citations: {refs}
 
@@ -56,6 +39,21 @@ def _build_valid_refs(chunks: list[dict[str, Any]]) -> tuple[set[int], set[str]]
     return valid_pr_numbers, valid_filenames
 
 
+def _find_hallucinated(citations: set[str], valid_pr_numbers: set[int], valid_filenames: set[str]) -> list[str]:
+    hallucinated = []
+    for cite in sorted(citations):
+        pr_match = re.match(r"\[PR #(\d+)\]$", cite)
+        if pr_match:
+            if int(pr_match.group(1)) not in valid_pr_numbers:
+                hallucinated.append(cite)
+            continue
+        ref_match = re.match(r"\[ref:\s*([^\]]+)\]$", cite)
+        if ref_match:
+            if ref_match.group(1).strip() not in valid_filenames:
+                hallucinated.append(cite)
+    return hallucinated
+
+
 @dataclass
 class CriticResult:
     verified: bool
@@ -66,41 +64,20 @@ class CriticResult:
 class Critic:
     """Verifies and cleans hallucinated citations from synthesizer output."""
 
-    def __init__(self, client: anthropic.Anthropic) -> None:
+    def __init__(self, client: anthropic.Anthropic, model: str = MODEL) -> None:
         self.client = client
+        self.model = model
 
     def verify(self, review_markdown: str, context_chunks: list[dict[str, Any]]) -> CriticResult:
+        if not context_chunks:
+            return CriticResult(verified=True, hallucinated_refs=[], cleaned_review=review_markdown)
+
         citations = _extract_citations(review_markdown)
         if not citations:
             return CriticResult(verified=True, hallucinated_refs=[], cleaned_review=review_markdown)
 
         valid_pr_numbers, valid_filenames = _build_valid_refs(context_chunks)
-
-        valid_refs_text = (
-            f"Valid PR numbers: {sorted(valid_pr_numbers)}\n"
-            f"Valid filenames: {sorted(valid_filenames)}"
-        )
-        user_message = (
-            f"{valid_refs_text}\n\n"
-            f"Citations found in review: {', '.join(sorted(citations))}\n\n"
-            f"Review:\n{review_markdown}"
-        )
-
-        try:
-            response = self.client.messages.create(
-                model=MODEL,
-                max_tokens=512,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_message}],
-            )
-            import json, re as _re
-            raw = response.content[0].text.strip()
-            raw = _re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
-            data = json.loads(raw)
-            hallucinated = data.get("hallucinated_refs", [])
-        except Exception as exc:
-            logger.warning("Critic verification failed: %s", exc)
-            hallucinated = []
+        hallucinated = _find_hallucinated(citations, valid_pr_numbers, valid_filenames)
 
         if not hallucinated:
             return CriticResult(verified=True, hallucinated_refs=[], cleaned_review=review_markdown)
@@ -113,7 +90,7 @@ class Critic:
         refs_str = ", ".join(hallucinated)
         try:
             response = self.client.messages.create(
-                model=MODEL,
+                model=self.model,
                 max_tokens=4096,
                 messages=[{
                     "role": "user",

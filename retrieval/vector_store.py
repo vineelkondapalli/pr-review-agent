@@ -124,6 +124,38 @@ class VectorStore:
 
         return models.Filter(must=must) if must else models.Filter()
 
+    def fetch_pr_titles(self, pr_numbers: list[int]) -> dict[int, str]:
+        """Return {pr_number: title} by fetching metadata chunks for the given PRs."""
+        if not pr_numbers:
+            return {}
+        scroll_filter = models.Filter(must=[
+            models.FieldCondition(key="chunk_type", match=models.MatchValue(value="metadata")),
+            models.FieldCondition(key="pr_number", match=models.MatchAny(any=pr_numbers)),
+        ])
+        records, _ = self.client.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=scroll_filter,
+            limit=len(pr_numbers),
+            with_payload=True,
+            with_vectors=False,
+        )
+        result: dict[int, str] = {}
+        for r in records:
+            payload = r.payload or {}
+            pr_num = payload.get("pr_number")
+            if pr_num is None:
+                continue
+            title = (payload.get("title") or "").strip()
+            if not title:
+                text = payload.get("text", "")
+                first_line = text.split("\n")[0]
+                prefix = f"PR #{pr_num}: "
+                if first_line.startswith(prefix):
+                    title = first_line[len(prefix):].strip()
+            if title:
+                result[pr_num] = title
+        return result
+
     def delete_collection(self) -> None:
         self.client.delete_collection(self.collection_name)
         logger.info("Deleted Qdrant collection '%s'", self.collection_name)

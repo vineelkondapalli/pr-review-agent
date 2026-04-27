@@ -9,14 +9,15 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5-20251001"
+MODEL = "claude-sonnet-4-6"
 MAX_HISTORY_TURNS = 10  # 10 turns = 20 messages (user + assistant)
 
 SYSTEM_PROMPT = """You are an expert assistant for analyzing a GitHub repository's PR history.
 Answer questions by citing specific PR numbers and filenames from the provided context.
 Use [PR #N] citations when referencing specific pull requests.
-Be concise and ground every claim in the provided context.
-If the context does not contain enough information to answer, say so clearly."""
+Be concise — keep answers short and direct, no more than 3-4 sentences or a brief bullet list.
+Ground every claim in the provided context.
+If the context does not contain enough information to answer, say so in one sentence."""
 
 
 def _format_chunks(chunks: list[dict[str, Any]]) -> str:
@@ -40,12 +41,14 @@ class ChatAgent:
         embedder: Any,
         reranker: Any,
         top_k: int = 15,
+        model: str = MODEL,
     ) -> None:
         self.client = client
         self.vector_store = vector_store
         self.embedder = embedder
         self.reranker = reranker
         self.top_k = top_k
+        self.model = model
         self.history: list[dict[str, str]] = []
 
     def reset(self) -> None:
@@ -87,8 +90,8 @@ class ChatAgent:
 
         full_response = ""
         with self.client.messages.stream(
-            model=MODEL,
-            max_tokens=1024,
+            model=self.model,
+            max_tokens=650,
             system=SYSTEM_PROMPT,
             messages=messages,
         ) as stream:

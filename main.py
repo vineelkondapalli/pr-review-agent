@@ -25,6 +25,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -61,13 +62,20 @@ console = _make_console()
 PURPLE = "#8B5CF6"
 CYAN = "#06B6D4"
 
+_MODEL_ALIASES: dict[str, str] = {
+    "haiku": "claude-haiku-4-5-20251001",
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-7",
+}
+_DEFAULT_MODEL_ALIAS = "haiku"
+
 BANNER = """\
- ██████╗ ███████╗██╗   ██╗██╗   ██╗███████╗
- ██╔══██╗██╔════╝██║   ██║██║   ██║██╔════╝
- ██████╔╝█████╗  ██║   ██║██║   ██║█████╗
- ██╔══██╗██╔══╝  ╚██╗ ██╔╝██║   ██║██╔══╝
- ██║  ██║███████╗ ╚████╔╝ ╚██████╔╝███████╗
- ╚═╝  ╚═╝╚══════╝  ╚═══╝   ╚═════╝ ╚══════╝"""
+ ██████╗  ███████╗ ██╗   ██╗ ██╗   ██╗ ███████╗
+ ██╔══██╗ ██╔════╝ ██║   ██║ ██║   ██║ ██╔════╝
+ ██████╔╝ █████╗   ██║   ██║ ██║   ██║ █████╗
+ ██╔══██╗ ██╔══╝   ╚██╗ ██╔╝ ██║   ██║ ██╔══╝
+ ██║  ██║ ███████╗  ╚████╔╝  ╚██████╔╝ ███████╗
+ ╚═╝  ╚═╝ ╚══════╝   ╚═══╝    ╚═════╝  ╚══════╝"""
 
 _VERDICT_STYLE = {
     "Approve": "bold green",
@@ -109,10 +117,12 @@ def _gradient_line(text: str) -> Text:
 # ── Banner ─────────────────────────────────────────────────────────────────────
 
 def _print_banner() -> None:
+    console.print(Rule(style=PURPLE))
     console.print()
     for line in BANNER.splitlines():
         console.print(_gradient_line(line), justify="left")
     console.print()
+    console.print(Rule(style=PURPLE))
     subtitle = Text("AI-powered code review  •  RAG-grounded  •  MCP-enabled", style=CYAN, justify="center")
     console.print(Panel(subtitle, border_style=PURPLE, padding=(0, 4)))
     console.print(f"  [dim]version 1.0.0  •  powered by Claude[/dim]")
@@ -124,6 +134,7 @@ def _print_banner() -> None:
 
 def _make_prompt(session: dict[str, Any]) -> Text:
     active_repo = session.get("active_repo")
+    model_alias = session.get("model", _DEFAULT_MODEL_ALIAS)
     prompt = Text()
     prompt.append("◆ ", style=f"{PURPLE} bold")
     prompt.append("revue", style=f"{PURPLE} bold")
@@ -132,26 +143,34 @@ def _make_prompt(session: dict[str, Any]) -> Text:
         prompt.append(" [", style=PURPLE)
         prompt.append(repo_name, style=f"{CYAN} bold")
         prompt.append("]", style=PURPLE)
+    prompt.append(" [", style=PURPLE)
+    prompt.append(model_alias, style=f"{CYAN} bold")
+    prompt.append("]", style=PURPLE)
     prompt.append(" > ", style=f"{PURPLE} bold")
     return prompt
 
 
 # ── Citations panel ────────────────────────────────────────────────────────────
 
-def _citations_panel(chunks: list[dict[str, Any]]) -> None:
+def _citations_panel(chunks: list[dict[str, Any]], vs: Any = None) -> None:
     if not chunks:
         return
 
-    # Extract titles from metadata chunks
+    # Extract titles — prefer the stored title field (new data), fall back to parsing
+    # metadata chunk text (old data where title wasn't stored on every chunk).
     title_map: dict[int, str] = {}
     for chunk in chunks:
-        if chunk.get("chunk_type") == "metadata":
-            pr_num = chunk.get("pr_number")
-            if pr_num is not None and pr_num not in title_map:
-                first_line = chunk.get("text", "").split("\n")[0]
-                prefix = f"PR #{pr_num}: "
-                if first_line.startswith(prefix):
-                    title_map[pr_num] = first_line[len(prefix):]
+        pr_num = chunk.get("pr_number")
+        if pr_num is None or pr_num in title_map:
+            continue
+        title = (chunk.get("title") or "").strip()
+        if title:
+            title_map[pr_num] = title
+        elif chunk.get("chunk_type") == "metadata":
+            first_line = chunk.get("text", "").split("\n")[0]
+            prefix = f"PR #{pr_num}: "
+            if first_line.startswith(prefix):
+                title_map[pr_num] = first_line[len(prefix):]
 
     # Aggregate best score per PR
     best_score: dict[int, float] = {}
@@ -163,14 +182,20 @@ def _citations_panel(chunks: list[dict[str, Any]]) -> None:
         if pr_num not in best_score or score > best_score[pr_num]:
             best_score[pr_num] = score
 
+    # For PRs still missing a title, fetch their metadata chunks from Qdrant.
+    if vs is not None:
+        missing = [pn for pn in best_score if pn not in title_map]
+        if missing:
+            title_map.update(vs.fetch_pr_titles(missing))
+
     table = Table(show_header=True, border_style="dim", padding=(0, 1))
+    table.add_column("Rank", style="dim", width=5, no_wrap=True, justify="right")
     table.add_column("PR #", style=CYAN, width=6, no_wrap=True)
     table.add_column("Title", style="white")
-    table.add_column("Score", style="dim", justify="right", width=7, no_wrap=True)
 
-    for pr_num in sorted(best_score, key=lambda n: best_score[n], reverse=True):
+    for rank, pr_num in enumerate(sorted(best_score, key=lambda n: best_score[n], reverse=True), 1):
         title = title_map.get(pr_num, "[dim](no title)[/dim]")
-        table.add_row(str(pr_num), title, f"{best_score[pr_num]:.3f}")
+        table.add_row(f"#{rank}", str(pr_num), title)
 
     console.print(Panel(table, title="[dim]Context Sources[/dim]", border_style="dim"))
 
@@ -193,6 +218,8 @@ def _cmd_ingest(args: list[str], session: dict[str, Any]) -> None:
             limit = int(args[1])
         except ValueError:
             pass
+
+    _ensure_models()
 
     from ingestion.github_fetcher import GitHubFetcher
     from ingestion.chunker import chunk_pr
@@ -325,6 +352,8 @@ def _cmd_review(args: list[str], session: dict[str, Any]) -> None:
         )
         return
 
+    _ensure_models()
+
     import anthropic
     from github import Auth, Github
     from ingestion.embedder import Embedder
@@ -354,10 +383,11 @@ def _cmd_review(args: list[str], session: dict[str, Any]) -> None:
 
         status.update(f"[{CYAN}]Planning retrieval queries...[/]")
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        model_id = _MODEL_ALIASES[session.get("model", _DEFAULT_MODEL_ALIAS)]
         vs = VectorStore(collection_name=collection)
         embedder = Embedder()
         reranker = Reranker()
-        planner = Planner(client)
+        planner = Planner(client, model=model_id)
         plan = planner.plan(pr_diff)
 
         status.update(f"[{CYAN}]Retrieving context ({len(plan.queries)} queries)...[/]")
@@ -365,11 +395,11 @@ def _cmd_review(args: list[str], session: dict[str, Any]) -> None:
         context_chunks = executor.execute(plan, pr_number_lt=pr_number)
 
         status.update(f"[{CYAN}]Synthesizing review...[/]")
-        synthesizer = Synthesizer(client)
+        synthesizer = Synthesizer(client, model=model_id)
         result = synthesizer.synthesize(pr_diff, context_chunks)
 
         status.update(f"[{CYAN}]Verifying citations...[/]")
-        critic = Critic(client)
+        critic = Critic(client, model=model_id)
         final = critic.verify(result.raw_markdown, context_chunks)
 
     # Header
@@ -389,9 +419,10 @@ def _cmd_review(args: list[str], session: dict[str, Any]) -> None:
     console.print()
 
     if not final.verified:
+        from rich.markup import escape as _escape
         console.print(
             f"[yellow]⚠ Critic removed hallucinated refs: "
-            f"{', '.join(final.hallucinated_refs)}[/yellow]"
+            f"{_escape(', '.join(final.hallucinated_refs))}[/yellow]"
         )
         console.print()
 
@@ -400,7 +431,7 @@ def _cmd_review(args: list[str], session: dict[str, Any]) -> None:
     console.print()
 
     # Citations
-    _citations_panel(context_chunks)
+    _citations_panel(context_chunks, vs=vs)
 
 
 def _cmd_chat(args: list[str], session: dict[str, Any]) -> None:
@@ -411,6 +442,8 @@ def _cmd_chat(args: list[str], session: dict[str, Any]) -> None:
 
     collection = repo.replace("/", "_")
 
+    _ensure_models()
+
     import anthropic
     from ingestion.embedder import Embedder
     from retrieval.reranker import Reranker
@@ -418,10 +451,11 @@ def _cmd_chat(args: list[str], session: dict[str, Any]) -> None:
     from agents.chat import ChatAgent
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    model_id = _MODEL_ALIASES[session.get("model", _DEFAULT_MODEL_ALIAS)]
     vs = VectorStore(collection_name=collection)
     embedder = Embedder()
     reranker = Reranker()
-    agent = ChatAgent(client, vs, embedder, reranker)
+    agent = ChatAgent(client, vs, embedder, reranker, model=model_id)
 
     console.print(
         f"[dim]Chat with [{CYAN}]{repo}[/{CYAN}] PR history. "
@@ -480,15 +514,7 @@ def _cmd_chat(args: list[str], session: dict[str, Any]) -> None:
         console.print()
 
         if source_chunks:
-            # Show warning if all scores are very low
-            best = max((c.get("rerank_score", c.get("score", 0.0)) for c in source_chunks), default=0.0)
-            if best < 0.3:
-                console.print(
-                    "[yellow]⚠ Could not find relevant context for this question "
-                    "in the ingested repo.[/yellow]"
-                )
-            else:
-                _citations_panel(source_chunks)
+            _citations_panel(source_chunks, vs=vs)
 
         console.print()
 
@@ -574,6 +600,7 @@ def _cmd_eval(args: list[str], session: dict[str, Any]) -> None:
     repo = session.get("active_repo")
     limit = 200
     holdout = 30
+    model_alias = session.get("model", _DEFAULT_MODEL_ALIAS)
 
     i = 0
     while i < len(args):
@@ -586,8 +613,15 @@ def _cmd_eval(args: list[str], session: dict[str, Any]) -> None:
         elif args[i] == "--holdout" and i + 1 < len(args):
             holdout = int(args[i + 1])
             i += 2
+        elif args[i] == "--model" and i + 1 < len(args):
+            model_alias = args[i + 1]
+            i += 2
         else:
             i += 1
+
+    if model_alias not in _MODEL_ALIASES:
+        console.print(f"[red]Unknown model '{model_alias}'. Choose: {', '.join(_MODEL_ALIASES)}[/red]")
+        return
 
     if not repo:
         console.print(
@@ -598,7 +632,7 @@ def _cmd_eval(args: list[str], session: dict[str, Any]) -> None:
 
     from eval.evaluate import EvalRunner
 
-    runner = EvalRunner(repo_str=repo, holdout=holdout, limit=limit)
+    runner = EvalRunner(repo_str=repo, holdout=holdout, limit=limit, model=_MODEL_ALIASES[model_alias])
 
     with Progress(
         SpinnerColumn(),
@@ -632,7 +666,6 @@ def _cmd_eval(args: list[str], session: dict[str, Any]) -> None:
     table.add_column("Retrieval Recall", justify="right")
     table.add_column("Citation Accuracy", justify="center")
     table.add_column("Review Quality", justify="right")
-    table.add_column("Hallucinations Caught", justify="center")
 
     for r in records:
         table.add_row(
@@ -640,7 +673,6 @@ def _cmd_eval(args: list[str], session: dict[str, Any]) -> None:
             f"{r.retrieval_recall:.2f}",
             "[green]✓[/green]" if r.citation_accurate else "[red]✗[/red]",
             str(r.relevance_score),
-            "[green]✓[/green]" if r.citation_accurate else "[red]✗[/red]",
         )
 
     avg_recall = sum(r.retrieval_recall for r in records) / len(records)
@@ -653,10 +685,25 @@ def _cmd_eval(args: list[str], session: dict[str, Any]) -> None:
         f"[bold {CYAN}]{avg_recall:.2f}[/]",
         f"[bold {CYAN}]{pct_cite:.0f}%[/]",
         f"[bold {CYAN}]{avg_rel:.2f}[/]",
-        "",
     )
 
     console.print(table)
+
+
+def _cmd_model(args: list[str], session: dict[str, Any]) -> None:
+    if not args:
+        current = session.get("model", _DEFAULT_MODEL_ALIAS)
+        console.print(f"Current model: [{CYAN}]{current}[/{CYAN}] ({_MODEL_ALIASES[current]})")
+        console.print(f"Available: {', '.join(_MODEL_ALIASES)}")
+        return
+
+    alias = args[0].lower()
+    if alias not in _MODEL_ALIASES:
+        console.print(f"[red]Unknown model '{alias}'. Choose: {', '.join(_MODEL_ALIASES)}[/red]")
+        return
+
+    session["model"] = alias
+    console.print(f"[green]✓ Model set to [bold]{alias}[/bold] ({_MODEL_ALIASES[alias]})[/green]")
 
 
 def _cmd_use(args: list[str], session: dict[str, Any]) -> None:
@@ -708,9 +755,10 @@ def _cmd_help(args: list[str], session: dict[str, Any]) -> None:
         ("review", "<pr_number>", "Review a PR (uses active repo)"),
         ("review", "<owner/repo> <pr_number>", "Review a PR in any repo"),
         ("chat", "[message]", "Chat about the repo's PR history (RAG-grounded)"),
+        ("model", "[haiku | sonnet | opus]", "Show or switch the Claude model"),
         ("collections", "", "List all Qdrant collections"),
         ("clear", "<owner/repo>", "Delete a Qdrant collection"),
-        ("eval", "[--repo R] [--limit N] [--holdout N]", "Run evaluation harness"),
+        ("eval", "[--repo R] [--limit N] [--holdout N] [--model M]", "Run evaluation harness"),
         ("serve", "", "Start MCP server on stdio"),
         ("help", "", "Show this help table"),
         ("exit / quit", "", "Exit Revue"),
@@ -737,6 +785,7 @@ COMMANDS: dict[str, Any] = {
     "collections": _cmd_collections,
     "clear": _cmd_clear,
     "eval": _cmd_eval,
+    "model": _cmd_model,
     "serve": _cmd_serve,
     "help": _cmd_help,
     "exit": _cmd_exit,
@@ -803,10 +852,12 @@ _CHAT_COMPLETER = WordCompleter(["exit", "back", "reset", "quit"], ignore_case=T
 def _pt_main_prompt(session: dict[str, Any]) -> PT_ANSI:
     """Build the styled REPL prompt string for prompt_toolkit."""
     active_repo = session.get("active_repo")
+    model_alias = session.get("model", _DEFAULT_MODEL_ALIAS)
     p = "\033[38;2;139;92;246m◆ revue"
     if active_repo:
         name = active_repo.split("/")[-1]
         p += f" [\033[38;2;6;182;212m{name}\033[38;2;139;92;246m]"
+    p += f" [\033[38;2;6;182;212m{model_alias}\033[38;2;139;92;246m]"
     p += " > \033[0m"
     return PT_ANSI(p)
 
@@ -861,18 +912,31 @@ def _repl(session: dict[str, Any]) -> None:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _ensure_models() -> None:
+    """Block until models are ready; prints one line if we had to wait."""
+    import models as _models
+    if not _models.is_ready():
+        _models.wait()
+        console.print(f"[dim]HF models loaded.[/dim]")
+
+
 def main() -> None:
     # Ensure stdout handles Unicode (needed on Windows where default is cp1252)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
-    try:
-        with Status(f"[{CYAN}]Loading models...[/]", console=console):
-            import models  # noqa: F401 — triggers singleton loading
-    except KeyboardInterrupt:
-        sys.exit(0)
+
+    # Direct subcommand: `python main.py serve` bypasses the REPL entirely so
+    # the process can be launched as a stdio MCP server by Claude Code / Cursor.
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        from mcp_server.server import run
+        run()
+        return
+
+    import models as _models
+    _models.load_async()
     _print_banner()
-    session: dict[str, Any] = {"active_repo": None, "active_collection": None}
+    session: dict[str, Any] = {"active_repo": None, "active_collection": None, "model": _DEFAULT_MODEL_ALIAS}
     _repl(session)
 
 

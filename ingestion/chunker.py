@@ -25,6 +25,7 @@ def chunk_pr(pr: PRData, repo: str) -> list[Chunk]:
     outcome = "merged" if pr.merged else "closed"
     base_meta = {
         "pr_number": pr.pr_number,
+        "title": pr.title,
         "author": pr.author,
         "date": pr.created_at,
         "outcome": outcome,

@@ -9,7 +9,7 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5-20251001"
+MODEL = "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = """You analyze PR diffs and produce a structured retrieval plan.
 
@@ -54,8 +54,9 @@ def _extract_json(text: str) -> dict:
 class Planner:
     """Analyzes a PR diff and generates targeted retrieval queries."""
 
-    def __init__(self, client: anthropic.Anthropic) -> None:
+    def __init__(self, client: anthropic.Anthropic, model: str = MODEL) -> None:
         self.client = client
+        self.model = model
 
     def plan(self, pr_diff: str) -> PlannerOutput:
         truncated = _truncate_diff(pr_diff)
@@ -68,7 +69,7 @@ class Planner:
 
             try:
                 response = self.client.messages.create(
-                    model=MODEL,
+                    model=self.model,
                     max_tokens=512,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],

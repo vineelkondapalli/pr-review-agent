@@ -10,8 +10,9 @@ build/
 .DS_Store
 cache/
 
-# Claude Code local settings (machine-specific overrides)
-.claude/settings.local.json
+# Claude Code project files (kept local, not pushed to GitHub)
+.claude/
+CLAUDE.md
 
 # MCP local config (contains machine-specific paths/settings)
 .mcp.json
